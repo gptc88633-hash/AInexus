@@ -11,77 +11,64 @@ from telegram.ext import (
 
 from openai import OpenAI
 
-# -------------------- ЛОГИ --------------------
+# ---------------- CONFIG ----------------
+
 logging.basicConfig(level=logging.INFO)
 
-# -------------------- ENV --------------------
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# -------------------- OPENAI --------------------
-client = None
-if OPENAI_API_KEY:
-    client = OpenAI(api_key=OPENAI_API_KEY)
+if not TELEGRAM_BOT_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN не задан")
 
-# -------------------- HANDLERS --------------------
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY не задан")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# ---------------- HANDLERS ----------------
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if OPENAI_API_KEY:
-        await update.message.reply_text(
-            "AInexus запущен ✅\n\n"
-            "OpenAI-ключ найден. Напиши сообщение — отвечу."
-        )
-    else:
-        await update.message.reply_text(
-            "AInexus запущен ✅\n\n"
-            "⚠️ OpenAI-ключ не задан. Работаю в режиме эхо."
-        )
+    await update.message.reply_text(
+        "🤖 AInexus запущен\n\n"
+        "Напиши любой вопрос — я отвечу с помощью OpenAI."
+    )
 
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or ""
-
-    # Если OpenAI не подключён — просто эхо
-    if not client:
-        await update.message.reply_text(f"Ты написал: {text}")
-        return
+async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {
-                    "role": "system",
-                    "content": "Ты дружелюбный Telegram-ассистент по имени AInexus."
-                },
-                {
-                    "role": "user",
-                    "content": text
-                }
+                {"role": "system", "content": "Ты полезный, вежливый AI-ассистент."},
+                {"role": "user", "content": user_text},
             ],
+            temperature=0.7,
         )
 
         answer = response.choices[0].message.content
         await update.message.reply_text(answer)
 
     except Exception as e:
-        logging.exception(e)
+        logging.exception("Ошибка OpenAI")
         await update.message.reply_text(
-            "⚠️ OpenAI сейчас недоступен. Попробуй позже."
+            "⚠️ OpenAI временно недоступен. Попробуй ещё раз через минуту."
         )
 
-# -------------------- MAIN --------------------
-def main():
-    if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("Не задана переменная окружения TELEGRAM_BOT_TOKEN")
+# ---------------- MAIN ----------------
 
+def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_reply))
 
     app.run_polling()
 
 if __name__ == "__main__":
     main()
+
 
 
 

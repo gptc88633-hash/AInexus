@@ -1,79 +1,57 @@
 import os
 import logging
-
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+
+logging.basicConfig(level=logging.INFO)
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
+# OpenAI подключаем только если ключ задан
+client = None
+if OPENAI_API_KEY:
+    from openai import OpenAI
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+SYSTEM_PROMPT = (
+    "Ты — AInexus, полезный ассистент. Отвечай по-русски, коротко и по делу."
 )
-
-# OpenAI SDK (новый стиль)
-from openai import OpenAI
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-logger = logging.getLogger("ainexus-bot")
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-
-# Создаём клиента только если ключ задан — иначе бот работает в режиме echo
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "AInexus запущен ✅\n\n"
-        "Напиши сообщение — отвечу.\n"
-        "Если OpenAI-ключ не задан, отвечаю в режиме эхо."
-    )
-
+    msg = "AInexus запущен ✅\n\nНапиши сообщение — отвечу."
+    if not OPENAI_API_KEY:
+        msg += "\n\n⚠️ OpenAI-ключ не задан — отвечаю в режиме эхо."
+    await update.message.reply_text(msg)
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     if not text:
         return
 
-    # 1) Если OpenAI не подключён — просто эхо
-    if client is None:
+    # Если ключа нет — эхо
+    if not client:
         await update.message.reply_text(f"Ты написал: {text}")
         return
 
-    # 2) OpenAI подключён — отвечаем “умно”
     try:
-        # Небольшая индикация набора текста
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
+        # Вариант 1: самый простой и стабильный — Chat Completions
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Ты дружелюбный помощник Telegram-бота AInexus. Отвечай кратко и по делу."},
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": text},
             ],
             temperature=0.6,
-            max_tokens=500,
         )
-
-        answer = (resp.choices[0].message.content or "").strip()
-        if not answer:
-            answer = "Пустой ответ от модели. Попробуй переформулировать вопрос."
-
-        await update.message.reply_text(answer)
-
+        answer = resp.choices[0].message.content.strip()
+        await update.message.reply_text(answer if answer else "Пустой ответ 🤔")
     except Exception as e:
-        # На всякий случай не падаем: логируем и отвечаем эхо
-        logger.exception("OpenAI error: %s", e)
+        logging.exception("OpenAI error")
         await update.message.reply_text(
-            "Сейчас не получилось достучаться до OpenAI. "
-            "Я отвечу в режиме эхо:\n\n"
-            f"Ты написал: {text}"
+            "⚠️ OpenAI сейчас недоступен. Я живой, просто ИИ не ответил. "
+            "Попробуй ещё раз через минуту."
         )
-
 
 def main():
     if not TELEGRAM_BOT_TOKEN:
@@ -82,8 +60,7 @@ def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
+    app.run_polling()
 
 if __name__ == "__main__":
     main()

@@ -12,6 +12,10 @@ from telegram.ext import (
     filters,
 )
 
+# --- OpenAI ---
+from openai import OpenAI
+from openai import APIError, RateLimitError, AuthenticationError
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("AInexus")
 
@@ -20,6 +24,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # Render для Web Service ожидает открытый порт:
 PORT = int(os.getenv("PORT", "10000"))
+
+# OpenAI client (создаём только если ключ есть)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 
 # ----------------- Mini HTTP server (для Render) -----------------
@@ -36,17 +43,60 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def log_message(self, format, *args):
-        # чтобы не засорять логи Render
         return
 
 
 def run_http_server():
     try:
         server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-        logger.info(f"HTTP server started on 0.0.0.0:{PORT} (health endpoints: /, /healthz)")
+        logger.info(f"HTTP server started on 0.0.0.0:{PORT} (/, /healthz)")
         server.serve_forever()
     except Exception as e:
         logger.exception(f"HTTP server failed: {e}")
+
+
+# ----------------- OpenAI helper -----------------
+
+def ask_openai(user_text: str) -> str:
+    """
+    Возвращает текст ответа от OpenAI.
+    Важно: при ошибках НЕ падаем, а возвращаем понятное сообщение.
+    """
+    if not client:
+        return "⚠️ OpenAI-ключ не задан — работаю в режиме эхо."
+
+    try:
+        resp = client.responses.create(
+            model="gpt-4o-mini",
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты — помощник бота AInexus. Отвечай кратко, по делу, на русском. "
+                        "Если вопрос непонятен — уточни."
+                    ),
+                },
+                {"role": "user", "content": user_text},
+            ],
+        )
+
+        # Универсально достаем текст
+        text = getattr(resp, "output_text", "") or ""
+        text = text.strip()
+        return text if text else "⚠️ Пустой ответ от модели. Попробуй переформулировать."
+
+    except AuthenticationError:
+        return "❌ OpenAI-ключ неверный или отозван. Проверь OPENAI_API_KEY в Render."
+    except RateLimitError:
+        # сюда попадает и 429, и insufficient_quota в некоторых случаях
+        return "⚠️ OpenAI временно недоступен (лимит/квота). Попробуй позже."
+    except APIError as e:
+        # 5xx/4xx от OpenAI (кроме auth/ratelimit)
+        logger.exception(f"OpenAI APIError: {e}")
+        return "⚠️ Ошибка OpenAI. Попробуй чуть позже."
+    except Exception as e:
+        logger.exception(f"OpenAI unexpected error: {e}")
+        return "⚠️ Не удалось получить ответ от OpenAI. Попробуй позже."
 
 
 # ----------------- Telegram handlers -----------------
@@ -63,7 +113,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Как пользоваться:\n"
         "1) Просто напиши вопрос текстом.\n"
-        "2) Я отвечу (если OpenAI-ключ подключен — будет ИИ-ответ).\n\n"
+        "2) Я отвечу.\n\n"
         "Команды:\n"
         "/start — запуск\n"
         "/tariffs — тарифы и лимиты\n"
@@ -76,7 +126,7 @@ async def tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Тарифы и лимиты (временно):\n"
         "— Тестовый режим.\n"
-        "— Лимиты и тарифы настроим после финального подключения OpenAI.\n"
+        "— Лимиты и тарифы настроим после финального теста OpenAI.\n"
     )
 
 
@@ -100,15 +150,14 @@ async def echo_or_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # Если ключа OpenAI нет — честный echo:
+    # Если ключа OpenAI нет — echo
     if not OPENAI_API_KEY:
-        await update.message.reply_text(
-            f"Ты написал: {text}\n\n⚠️ OpenAI-ключ не задан — работаю в режиме эхо."
-        )
+        await update.message.reply_text(f"Ты написал: {text}\n\n⚠️ OpenAI-ключ не задан — работаю в режиме эхо.")
         return
 
-    # На этом шаге мы НЕ вызываем OpenAI, чтобы не ловить 429/insufficient_quota.
-    await update.message.reply_text("✅ OpenAI-ключ вижу, следующий шаг — подключаем ответы от OpenAI.")
+    # Реальный ответ от OpenAI (без падений)
+    answer = ask_openai(text)
+    await update.message.reply_text(answer)
 
 
 def main():
@@ -116,8 +165,7 @@ def main():
         raise RuntimeError("Не задана переменная окружения TELEGRAM_BOT_TOKEN")
 
     # 1) Поднимаем порт для Render (в фоне)
-    t = threading.Thread(target=run_http_server, daemon=True)
-    t.start()
+    threading.Thread(target=run_http_server, daemon=True).start()
 
     # 2) Запускаем Telegram polling
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
@@ -136,3 +184,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
